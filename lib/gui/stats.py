@@ -10,7 +10,8 @@ from math import ceil, sqrt
 
 import numpy as np
 import tensorflow as tf
-from lib.Serializer import JSONSerializer
+from tensorflow.python import errors_impl as tf_errors  # pylint:disable=no-name-in-module
+from lib.serializer import get_serializer
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -86,13 +87,18 @@ class TensorBoardLogs():
             if session is not None and sess != session:
                 logger.debug("Skipping sessions: %s", sess)
                 continue
-            for logfile in sides.values():
-                timestamps = [event.wall_time
-                              for event in tf.train.summary_iterator(logfile)
-                              if event.summary.value]
-                logger.debug("Total timestamps for session %s: %s", sess, len(timestamps))
-                all_timestamps[sess] = timestamps
-                break  # break after first file read
+            try:
+                for logfile in sides.values():
+                    timestamps = [event.wall_time
+                                  for event in tf.train.summary_iterator(logfile)
+                                  if event.summary.value]
+                    logger.debug("Total timestamps for session %s: %s", sess, len(timestamps))
+                    all_timestamps[sess] = timestamps
+                    break  # break after first file read
+            except tf_errors.DataLossError as err:
+                logger.warning("The logs for Session %s are corrupted and cannot be displayed. "
+                               "The totals do not include this session. Original error message: "
+                               "'%s'", sess, str(err))
         return all_timestamps
 
 
@@ -101,7 +107,7 @@ class Session():
     def __init__(self, model_dir=None, model_name=None):
         logger.debug("Initializing %s: (model_dir: %s, model_name: %s)",
                      self.__class__.__name__, model_dir, model_name)
-        self.serializer = JSONSerializer
+        self.serializer = get_serializer("json")
         self.state = None
         self.modeldir = model_dir  # Set and reset by wrapper for training sessions
         self.modelname = model_name  # Set and reset by wrapper for training sessions
@@ -119,7 +125,7 @@ class Session():
     @property
     def config(self):
         """ Return config and other information """
-        retval = {key: val for key, val in self.state["config"]}
+        retval = self.state["config"].copy()
         retval["training_size"] = self.state["training_size"]
         retval["input_size"] = [val[0] for key, val in self.state["inputs"].items()
                                 if key.startswith("face")][0]
@@ -193,7 +199,7 @@ class Session():
         """ Return collated loss for all session """
         loss_dict = dict()
         all_loss = self.tb_logs.get_loss()
-        for key in sorted(int(idx) for idx in all_loss.keys()):
+        for key in sorted(int(idx) for idx in all_loss):
             for loss_key, side_loss in all_loss[key].items():
                 for side, loss in side_loss.items():
                     loss_dict.setdefault(loss_key, dict()).setdefault(side, list()).extend(loss)
@@ -231,13 +237,8 @@ class Session():
         """ Load the current state file """
         state_file = os.path.join(self.modeldir, "{}_state.json".format(self.modelname))
         logger.debug("Loading State: '%s'", state_file)
-        try:
-            with open(state_file, "rb") as inp:
-                state = self.serializer.unmarshal(inp.read().decode("utf-8"))
-                self.state = state
-                logger.debug("Loaded state: %s", state)
-        except IOError as err:
-            logger.warning("Unable to load state file. Graphing disabled: %s", str(err))
+        self.state = self.serializer.load(state_file)
+        logger.debug("Loaded state: %s", self.state)
 
     def get_iterations_for_session(self, session_id):
         """ Return the number of iterations for the given session id """
@@ -307,9 +308,9 @@ class SessionsSummary():
         """ Return total stats """
         logger.debug("Compiling Totals")
         elapsed = 0
-        rate = 0
-        batchset = set()
+        examples = 0
         iterations = 0
+        batchset = set()
         total_summaries = len(sessions_stats)
         for idx, summary in enumerate(sessions_stats):
             if idx == 0:
@@ -317,7 +318,7 @@ class SessionsSummary():
             if idx == total_summaries - 1:
                 endtime = summary["end"]
             elapsed += summary["elapsed"]
-            rate += summary["rate"]
+            examples += (summary["batch"] * summary["iterations"])
             batchset.add(summary["batch"])
             iterations += summary["iterations"]
         batch = ",".join(str(bs) for bs in batchset)
@@ -325,7 +326,7 @@ class SessionsSummary():
                   "start": starttime,
                   "end": endtime,
                   "elapsed": elapsed,
-                  "rate": rate / total_summaries,
+                  "rate": examples / elapsed if elapsed != 0 else 0,
                   "batch": batch,
                   "iterations": iterations}
         logger.debug(totals)
@@ -337,8 +338,8 @@ class SessionsSummary():
         logger.debug("Formatting stats")
         for summary in compiled_stats:
             hrs, mins, secs = convert_time(summary["elapsed"])
-            summary["start"] = time.strftime("%x %X", time.gmtime(summary["start"]))
-            summary["end"] = time.strftime("%x %X", time.gmtime(summary["end"]))
+            summary["start"] = time.strftime("%x %X", time.localtime(summary["start"]))
+            summary["end"] = time.strftime("%x %X", time.localtime(summary["end"]))
             summary["elapsed"] = "{}:{}:{}".format(hrs, mins, secs)
             summary["rate"] = "{0:.1f}".format(summary["rate"])
         return compiled_stats
@@ -402,7 +403,7 @@ class Calculations():
             if len(iterations) > 1:
                 # Crop all losses to the same number of items
                 if self.iterations == 0:
-                    raw = {lossname: list() for lossname in raw.keys()}
+                    raw = {lossname: list() for lossname in raw}
                 else:
                     raw = {lossname: loss[:self.iterations] for lossname, loss in raw.items()}
 
@@ -503,10 +504,8 @@ class Calculations():
             if idx < presample or idx >= datapoints - postsample:
                 avgs.append(None)
                 continue
-            else:
-                avg = sum(data[idx - presample:idx + postsample]) \
-                        / self.args["avg_samples"]
-                avgs.append(avg)
+            avg = sum(data[idx - presample:idx + postsample]) / self.args["avg_samples"]
+            avgs.append(avg)
         logger.debug("Calculated Average")
         return avgs
 

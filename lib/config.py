@@ -8,6 +8,7 @@ import os
 import sys
 from collections import OrderedDict
 from configparser import ConfigParser
+from importlib import import_module
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -118,7 +119,8 @@ class FaceswapConfig():
         self.defaults[title]["helptext"] = info
 
     def add_item(self, section=None, title=None, datatype=str, default=None, info=None,
-                 rounding=None, min_max=None, choices=None, gui_radio=False, fixed=True):
+                 rounding=None, min_max=None, choices=None, gui_radio=False, fixed=True,
+                 group=None):
         """ Add a default item to a config section
 
             For int or float values, rounding and min_max must be set
@@ -138,11 +140,13 @@ class FaceswapConfig():
             existing models, and will overide the value saved in the state file with the
             updated value in config.
 
+            The 'Group' parameter allows you to assign the config item to a group in the GUI
+
         """
         logger.debug("Add item: (section: '%s', title: '%s', datatype: '%s', default: '%s', "
                      "info: '%s', rounding: '%s', min_max: %s, choices: %s, gui_radio: %s, "
-                     "fixed: %s)", section, title, datatype, default, info, rounding, min_max,
-                     choices, gui_radio, fixed)
+                     "fixed: %s, group: %s)", section, title, datatype, default, info, rounding,
+                     min_max, choices, gui_radio, fixed, group)
 
         choices = list() if not choices else choices
 
@@ -168,7 +172,8 @@ class FaceswapConfig():
                                          "min_max": min_max,
                                          "choices": choices,
                                          "gui_radio": gui_radio,
-                                         "fixed": fixed}
+                                         "fixed": fixed,
+                                         "group": group}
 
     @staticmethod
     def expand_helptext(helptext, choices, default, datatype, min_max, fixed):
@@ -335,3 +340,22 @@ class FaceswapConfig():
         self.load_config()
         self.validate_config()
         logger.debug("Handled config")
+
+
+def generate_configs():
+    """ Generate config files if they don't exist.
+
+    This script is run prior to anything being set up, so don't use logging
+    Generates the default config files for plugins in the faceswap config folder
+    """
+
+    base_path = os.path.realpath(os.path.dirname(sys.argv[0]))
+    plugins_path = os.path.join(base_path, "plugins")
+    configs_path = os.path.join(base_path, "config")
+    for dirpath, _, filenames in os.walk(plugins_path):
+        if "_config.py" in filenames:
+            section = os.path.split(dirpath)[-1]
+            config_file = os.path.join(configs_path, "{}.ini".format(section))
+            if not os.path.exists(config_file):
+                mod = import_module("plugins.{}.{}".format(section, "_config"))
+                mod.Config(None)
